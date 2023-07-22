@@ -2,24 +2,187 @@
 
 
 int main() {
-	PVOID fileHandle = OpenPeFile("C:\\Users\\xuji\\Desktop\\PeCoding\\cmd_x86.exe");
+	PVOID fileHandle = OpenPeFile("C:\\Users\\xuji\\Desktop\\PeCoding\\ntdll.dll");
 	if (!fileHandle) {
 		Log("映射PE文件失败", "error", GetLastError());
 		return -1;
 	}
-	LogData("C:\\Users\\xuji\\Desktop\\PeCoding\\cmd_x86.exe", "内存中映射地址", "0x%p", fileHandle);
+	LogData("C:\\Users\\xuji\\Desktop\\PeCoding\\ntdll.dll", "内存中映射地址", "0x%p", fileHandle);
 	LONG peOffset = AnalyzeDosHeader(fileHandle);
 	Px86PEStructure pPeStructure =  AnalyzeNtHeader32(fileHandle, peOffset);
 	if (!pPeStructure) {
 		Log("为PE头关键信息分配空间失败", "error", GetLastError());
 		return -1;
 	}
+	// 解析节表头
 	AnalyzeSectionHeader(fileHandle, peOffset, pPeStructure);
+	// 解析导入表
+	AnalyzeImportTable(fileHandle, peOffset, pPeStructure);
+	// 解析导出表
+	AnalyzeExportTable(fileHandle, peOffset, pPeStructure);
 
 	// 释放资源
 	free(pPeStructure->pPeNtFileData);
 	free(pPeStructure->pPeNtOptionalData);
 	free(pPeStructure);
+}
+
+/**
+*	功能：	解析32位PE文件的导出表相关信息
+*   参数：	PE文件映射至内存的指针，偏移
+*	返回值：
+*/
+LONG AnalyzeExportTable(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeStructure) {
+	SplitLine();
+	if (pPeStructure->pPeNtOptionalData->Export.VirtualAddress == 0) {
+		LogExportTable("导出表不存在","None");
+		return 0;
+	}
+	// 定位到导出表
+	PIMAGE_DATA_DIRECTORY pExportDataDir = &pPeStructure->pPeNtOptionalData->Export;
+	// 导出表的位置，只有一张导出表
+	PIMAGE_EXPORT_DIRECTORY pExportTable = (PIMAGE_EXPORT_DIRECTORY)(RvaToFva(fileHandle, peOffset, pExportDataDir->VirtualAddress) + (LONG64)fileHandle);
+	// 打印基本信息
+	LogExportTable("DLL Name", "%s", (PCHAR)(RvaToFva(fileHandle, peOffset, pExportTable->Name) + (LONG64)fileHandle));
+	LogExportTable("Characteristics", "%08x", pExportTable->Characteristics);
+	LogExportTable("Time Data Stamp", "%08x", pExportTable->TimeDateStamp);
+	LogExportTable("MajorVersion", "%04x", pExportTable->MajorVersion);
+	LogExportTable("MinorVersion", "%04x", pExportTable->MinorVersion);
+	LogExportTable("Base", "%08x", pExportTable->Base); // 使用序号导出的函数的起始序号，函数序号 - 起始序号 => 函数地址表中的索引
+	LogExportTable("Number Of Functions", "%08x", pExportTable->NumberOfFunctions);
+	LogExportTable("Number Of Names", "%08x", pExportTable->NumberOfNames);
+	LogExportTable("Address Of Functions", "%08x", pExportTable->AddressOfFunctions);  //RVA
+	LogExportTable("Address Of Names", "%08x", pExportTable->AddressOfNames);   //RVA
+	LogExportTable("Address Of Name Ordinals", "%08x", pExportTable->AddressOfNameOrdinals);  //RVA
+	// 获取三张函数相关表的信息
+	DWORD *funcAddressTable = (DWORD *)(RvaToFva(fileHandle, peOffset, pExportTable->AddressOfFunctions) + (LONG64)fileHandle); // 函数地址表 
+	DWORD *funcNameTable = (DWORD *)(RvaToFva(fileHandle, peOffset, pExportTable->AddressOfNames) + (LONG64)fileHandle); // 函数名称表
+	WORD *funcNameOrdinalsTable = (WORD *)(RvaToFva(fileHandle, peOffset, pExportTable->AddressOfNameOrdinals) + (LONG64)fileHandle); // 函数名称顺序表
+	DWORD numberOfNames = pExportTable->NumberOfNames;
+	DWORD numberOfFuncs = pExportTable->NumberOfFunctions;
+	DWORD base = pExportTable->Base;
+	for (DWORD i = 0; i < numberOfFuncs; i++) {
+		if (funcAddressTable[i] == 0) {
+			continue; // 空的，也就是说这个序号是被跳过了的
+		}
+		DWORD j = 0;
+		for (; j < numberOfNames; j++) {
+			if (funcNameOrdinalsTable[j] == i) {
+				PCHAR name = (PCHAR)(RvaToFva(fileHandle, peOffset, funcNameTable[j]) + (LONG64)fileHandle);
+				WORD ordinal = base + i;
+				DWORD address = funcAddressTable[i];
+				LogExportTable("函数名称", "%s, 函数序号 : %04x, 函数地址(RVA)： %08x, 函数文件地址(FVA): %08x", name, ordinal, address, RvaToFva(fileHandle, peOffset, address));
+				break;
+			}
+		}
+		if (j == numberOfNames) {
+			WORD ordinal = base + i;
+			DWORD address = funcAddressTable[i];
+			LogExportTable("函数名称", "NULL, 函数序号 : %04x, 函数地址(RVA)： %08x, 函数文件地址(FVA): %08x", ordinal, address, RvaToFva(fileHandle, peOffset, address));
+		}
+	}
+	return 0;
+}
+
+/**
+*	功能：	解析32位PE文件的导入表相关信息
+*   参数：	Px86PEStructure结构体
+*	返回值：
+*/
+LONG AnalyzeImportTable(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeStructure) {
+	SplitLine();
+	if (pPeStructure->pPeNtOptionalData->Import.VirtualAddress == 0) {
+		LogImportTable("导入表不存在","None");
+		return 0;
+	}
+	// 找到数据目录表中的导入表基本信息
+	PIMAGE_DATA_DIRECTORY pImportDataDir = &pPeStructure->pPeNtOptionalData->Import;
+	// 获取第一张导入表的地址
+	PIMAGE_IMPORT_DESCRIPTOR pImportTable = (PIMAGE_IMPORT_DESCRIPTOR)(RvaToFva(fileHandle, peOffset, pImportDataDir->VirtualAddress) + (LONG64)fileHandle);
+	while (pImportTable->Characteristics != 0) {
+		// 获取导入表的名称
+		DWORD fva = RvaToFva(fileHandle, peOffset, pImportTable->Name);
+		LogImportTable("dll名称", "%s", (PCHAR)(fva + (LONG64)fileHandle));
+		// 解析INT  pImportTable->OriginalFirstThunk => THUNK_DATA数组
+		fva = RvaToFva(fileHandle, peOffset, pImportTable->OriginalFirstThunk);
+		PIMAGE_THUNK_DATA32 pImportNameTable = (PIMAGE_THUNK_DATA32)(fva + (LONG64)fileHandle);
+		while (pImportNameTable->u1.Ordinal != 0) {
+			// 判断最高位是否为1
+			if ((pImportNameTable->u1.Ordinal & 0x80000000) >> 31 != 1) {
+				// 最高位不为1，说明该函数既有函数名也有序号
+				fva = RvaToFva(fileHandle, peOffset, pImportNameTable->u1.AddressOfData);
+				PIMAGE_IMPORT_BY_NAME pTableFunc = (PIMAGE_IMPORT_BY_NAME)(fva + (LONG64)fileHandle);
+				LogImportTable("函数序号", "%04x, 函数名称 : %s", pTableFunc->Hint, pTableFunc->Name); // 说明每个PIMAGE_THUNK_DATA32的大小有用name属性的存在，其是不固定的。
+			}else {
+				// 最高位为1
+				LogImportTable("函数序号", "%04x", pImportNameTable->u1.Ordinal & 0x7fffffff);
+			}
+			// 下一个函数
+			pImportNameTable++;
+		}
+		// 下一张导入表
+		pImportTable++;
+	}
+	return 0;
+}
+
+/**
+*	功能：	RVA to FVA
+*   参数：	RVA，Px86PEStructure
+*	返回值：FVA
+*/
+DWORD RvaToFva(PVOID fileHandle , LONG peOffset, DWORD rva){
+	// pe头
+	PIMAGE_NT_HEADERS32 pNtHeaders = (PIMAGE_NT_HEADERS32)((LONG64)fileHandle + peOffset);
+	// PE文件头
+	PIMAGE_FILE_HEADER pNtFileHeader = &pNtHeaders->FileHeader;
+	// PE可选头
+	PIMAGE_OPTIONAL_HEADER32 pNtOpHeader = &pNtHeaders->OptionalHeader;
+	// 数据目录表的起点
+	PIMAGE_DATA_DIRECTORY pNtDataDir = pNtOpHeader->DataDirectory;
+
+	// 超出文件范围，不合法。
+	if (rva > pNtOpHeader->SizeOfImage || rva < 0) {
+		return 0;
+	}
+	// 当文件对齐与内存对齐同步时
+	DWORD fva = rva;
+	DWORD fileAlignment = pNtOpHeader->FileAlignment;
+	DWORD sectionAlignment = pNtOpHeader->SectionAlignment;
+	if (fileAlignment != sectionAlignment) {
+		PIMAGE_SECTION_HEADER pImageSectionHeader = (PIMAGE_SECTION_HEADER)((LONG64)fileHandle + peOffset + sizeof(IMAGE_NT_HEADERS32));
+		DWORD numberOfSections = pNtFileHeader->NumberOfSections;
+		#pragma warning(disable: 6305)
+		DWORD endSectionHeaders = (LONG64)pImageSectionHeader + numberOfSections * sizeof(IMAGE_SECTION_HEADER) - (LONG64)fileHandle;
+		// 在节表头及之前，PE结构是精密排列的。
+		if (rva <= endSectionHeaders) {
+			return fva;
+		}
+		// 在节表头之后到第一个节表之间，rva是无意义的。
+		if (rva > endSectionHeaders && rva < pImageSectionHeader->VirtualAddress) {
+			return 0;
+		}
+		for (DWORD i = 0; i < numberOfSections; i++) {
+			// 求出节内偏移
+			DWORD baseSection = pImageSectionHeader->VirtualAddress;
+			DWORD virtualSize = pImageSectionHeader->Misc.VirtualSize;
+			DWORD baseFileSection = pImageSectionHeader->PointerToRawData;
+			// RVA在两个节之间的空白区域时，无意义
+			if (i < numberOfSections - 1 && rva > baseSection + virtualSize && rva < (pImageSectionHeader + 1)->VirtualAddress) {
+				return 0;
+			}
+			// 找到对应节
+			if (rva >= baseSection && rva <= baseSection + virtualSize) {
+				// 节内偏移
+				DWORD sectionOffset = rva - baseSection;
+				// 计算fva，fva是针对文件0偏移处计算的；rva是针对文件内存映射处开始计算的
+				fva = baseFileSection + sectionOffset;
+				break;
+			}
+			pImageSectionHeader++;
+		}
+	}
+	return fva;
 }
 
 /**
@@ -36,7 +199,7 @@ LONG AnalyzeSectionHeader(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeSt
 		))
 	*/
 	SplitLine();
-	PIMAGE_SECTION_HEADER pImageSectionHeader = (PIMAGE_SECTION_HEADER)((LONG64)fileHandle + peOffset + sizeof(IMAGE_NT_HEADERS32));
+	PIMAGE_SECTION_HEADER pImageSectionHeader = pPeStructure->pImageSectionHeader;
 	DWORD numberOfSections = pPeStructure->pPeNtFileData->NumberOfSections;
 	for (DWORD i = 0; i < numberOfSections; i++) {
 		LogSecHeader("节表名称", "%s", pImageSectionHeader->Name);
@@ -56,8 +219,8 @@ LONG AnalyzeSectionHeader(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeSt
 
 /**
 *	功能：	打印32位PE文件的PE头相关信息
-*   参数：	PE文件映射至内存的指针
-*	返回值：一个PE头相关信息的结构体
+*   参数：	PE文件映射至内存的指针，偏移
+*	返回值：构建PEStructure。
 */
 Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset) {
 	SplitLine();
@@ -102,6 +265,8 @@ Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset) {
 	}else {
 		pPeStructure->pPeNtFileData = pPeNtFileData;
 		pPeStructure->pPeNtOptionalData = pPeNtOptionalData;
+		// 提前计算节表头的开始位置
+		pPeStructure->pImageSectionHeader = (PIMAGE_SECTION_HEADER)((LONG64)fileHandle + peOffset + sizeof(IMAGE_NT_HEADERS32));
 	}
 	// 打印PE标识以及PE文件头的信息
 	LogNtHeader("NT Magic", "%c%c", (CHAR)pNtHeaders->Signature, *(PCHAR)((LONG64)&pNtHeaders->Signature + 1));
@@ -167,7 +332,8 @@ Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset) {
 				pPeNtOptionalData->IAT.VirtualAddress = pNtDataDir->VirtualAddress;
 			}
 		}
-		LogNtHeader("NtOptionalHeader Data Directory", "%s => RVA: %08x, Size: %08x", dataDirName[i], pNtDataDir->VirtualAddress, pNtDataDir->Size);
+		LogNtHeader("NtOptionalHeader Data Directory", "%s => RVA: %08x, Size: %08x， FVA: %08x",
+			dataDirName[i], pNtDataDir->VirtualAddress, pNtDataDir->Size, RvaToFva(fileHandle, peOffset, pNtDataDir->VirtualAddress));
 		pNtDataDir++;
 	}
 	return pPeStructure;
@@ -181,7 +347,6 @@ Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset) {
 LONG AnalyzeDosHeader(PVOID fileHandle) {
 	SplitLine();
 	PIMAGE_DOS_HEADER pDosHeader = (PIMAGE_DOS_HEADER)fileHandle;
-	// printf("%2s\n", (PCHAR)((DWORD)fileHandle + (DWORD)&pDosHeader->e_magic));
 	LogDosHeader("DOS Magic", "%15c%c", (CHAR)pDosHeader->e_magic, *(PCHAR)((LONG64)&pDosHeader->e_magic + 1));
 	LogDosHeader("Bytes On Last Page", "%7x", pDosHeader->e_cblp);
 	LogDosHeader("Pages In File", "%11x", pDosHeader->e_cp);

@@ -59,6 +59,8 @@ typedef struct _x86PEStructure {
 	PPeNtFileHeaderData pPeNtFileData;
 	// NT可选头文件大小
 	PPeNtOptionalHeaderData32 pPeNtOptionalData;
+	// 第一个节表头起始位置
+	PIMAGE_SECTION_HEADER pImageSectionHeader;
 
 }x86PEStructure, * Px86PEStructure;
 
@@ -78,6 +80,10 @@ typedef struct _x64PEStructure {
 #define LogNtHeader(mark, how_type, ...) {printf("[----NtHeader-----]  %s : "how_type"\n", mark, __VA_ARGS__);}
 // 用于打印节表头信息
 #define LogSecHeader(mark, how_type, ...) {printf("[--SectionHeader--]  %s : "how_type"\n", mark, __VA_ARGS__);}
+// 用于打印各张导入表的信息
+#define LogImportTable(mark, how_type, ...) {printf("[---ImportTable---]  %s : "how_type"\n", mark, __VA_ARGS__);}
+// 用于打印导出表的信息
+#define LogExportTable(mark, how_type, ...) {printf("[---ExportTable---]  %s : "how_type"\n", mark, __VA_ARGS__);}
 // 分割线
 #define SplitLine() {printf("\n********************************************************************************\n\n");}
 
@@ -102,7 +108,7 @@ LONG AnalyzeDosHeader(PVOID fileHandle);
 /**
 *	功能：	打印32位PE文件的PE头相关信息
 *   参数：	PE文件映射至内存的指针，偏移
-*	返回值：数据目录表的偏移
+*	返回值：构建PEStructure。
 */
 Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset);
 
@@ -115,7 +121,7 @@ LONG AnalyzeSectionHeader(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeSt
 
 /**
 *	功能：	解析32位PE文件的导入表相关信息
-*   参数：	PE文件映射至内存的指针，偏移
+*   参数：	Px86PEStructure结构体
 *	返回值：
 */
 LONG AnalyzeImportTable(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeStructure);
@@ -126,3 +132,10 @@ LONG AnalyzeImportTable(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeStru
 *	返回值：
 */
 LONG AnalyzeExportTable(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeStructure);
+
+/**
+*	功能：	RVA to FVA
+*   参数：	PE文件映射至内存的指针，RVA，Px86PEStructure
+*	返回值：FVA
+*/
+DWORD RvaToFva(PVOID fileHandle, LONG peOffset, DWORD rva);
