@@ -1,38 +1,33 @@
+#define TYPE 0 // 0 =>32  1 =>64
 #include "pe.h"
 
-
-int main() {
-	PVOID fileHandle = OpenPeFile("C:\\Users\\xuji\\Desktop\\PeCoding\\ntdll.dll");
-	if (!fileHandle) {
-		Log("映射PE文件失败", "error", GetLastError());
-		return -1;
-	}
-	LogData("C:\\Users\\xuji\\Desktop\\PeCoding\\ntdll.dll", "内存中映射地址", "0x%p", fileHandle);
-	LONG peOffset = AnalyzeDosHeader(fileHandle);
-	Px86PEStructure pPeStructure =  AnalyzeNtHeader32(fileHandle, peOffset);
-	if (!pPeStructure) {
-		Log("为PE头关键信息分配空间失败", "error", GetLastError());
-		return -1;
-	}
-	// 解析节表头
-	AnalyzeSectionHeader(fileHandle, peOffset, pPeStructure);
-	// 解析导入表
-	AnalyzeImportTable(fileHandle, peOffset, pPeStructure);
-	// 解析导出表
-	AnalyzeExportTable(fileHandle, peOffset, pPeStructure);
-
-	// 释放资源
-	free(pPeStructure->pPeNtFileData);
-	free(pPeStructure->pPeNtOptionalData);
-	free(pPeStructure);
-}
-
 /**
-*	功能：	解析32位PE文件的导出表相关信息
+*	功能：	判断当前文件的位数
 *   参数：	PE文件映射至内存的指针，偏移
 *	返回值：
 */
-LONG AnalyzeExportTable(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeStructure) {
+VOID JudgeFile(PVOID fileHandle, LONG peOffset) {
+	/**
+	PWORD magic = (LONG64)fileHandle + peOffset + sizeof(IMAGE_FILE_HEADER) + sizeof(DWORD);
+	if (*magic == 0x010b) {
+		#undef x64_PROGRAM
+		#define x86_PROGRAM 32
+	}else if (*magic == 0x020b) {
+		#undef x86_PROGRAM
+		#define x64_PROGRAM 64
+	}else {
+		Log("未识别的文件位数", "error", -1);
+		exit(-1);
+	}
+	*/
+}
+
+/**
+*	功能：	解析32/64位PE文件的导出表相关信息
+*   参数：	PE文件映射至内存的指针，偏移，PPEStructure结构体
+*	返回值：
+*/
+LONG64 AnalyzeExportTable(PVOID fileHandle, LONG peOffset, PPEStructure pPeStructure) {
 	SplitLine();
 	if (pPeStructure->pPeNtOptionalData->Export.VirtualAddress == 0) {
 		LogExportTable("导出表不存在","None");
@@ -71,25 +66,25 @@ LONG AnalyzeExportTable(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeStru
 				PCHAR name = (PCHAR)(RvaToFva(fileHandle, peOffset, funcNameTable[j]) + (LONG64)fileHandle);
 				WORD ordinal = base + i;
 				DWORD address = funcAddressTable[i];
-				LogExportTable("函数名称", "%s, 函数序号 : %04x, 函数地址(RVA)： %08x, 函数文件地址(FVA): %08x", name, ordinal, address, RvaToFva(fileHandle, peOffset, address));
+				LogExportTable("函数名称", "%s, 函数序号 : %04x, 函数地址(RVA)： %08x, 函数文件地址(FVA): %08I64x", name, ordinal, address, RvaToFva(fileHandle, peOffset, address));
 				break;
 			}
 		}
 		if (j == numberOfNames) {
 			WORD ordinal = base + i;
 			DWORD address = funcAddressTable[i];
-			LogExportTable("函数名称", "NULL, 函数序号 : %04x, 函数地址(RVA)： %08x, 函数文件地址(FVA): %08x", ordinal, address, RvaToFva(fileHandle, peOffset, address));
+			LogExportTable("函数名称", "NULL, 函数序号 : %04x, 函数地址(RVA)： %08x, 函数文件地址(FVA): %08I64x", ordinal, address, RvaToFva(fileHandle, peOffset, address));
 		}
 	}
 	return 0;
 }
 
 /**
-*	功能：	解析32位PE文件的导入表相关信息
-*   参数：	Px86PEStructure结构体
+*	功能：	解析32/64位PE文件的导入表相关信息
+*   参数：	PE文件映射至内存的指针，偏移，PPEStructure结构体
 *	返回值：
 */
-LONG AnalyzeImportTable(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeStructure) {
+LONG64 AnalyzeImportTable(PVOID fileHandle, LONG peOffset, PPEStructure pPeStructure) {
 	SplitLine();
 	if (pPeStructure->pPeNtOptionalData->Import.VirtualAddress == 0) {
 		LogImportTable("导入表不存在","None");
@@ -101,21 +96,31 @@ LONG AnalyzeImportTable(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeStru
 	PIMAGE_IMPORT_DESCRIPTOR pImportTable = (PIMAGE_IMPORT_DESCRIPTOR)(RvaToFva(fileHandle, peOffset, pImportDataDir->VirtualAddress) + (LONG64)fileHandle);
 	while (pImportTable->Characteristics != 0) {
 		// 获取导入表的名称
-		DWORD fva = RvaToFva(fileHandle, peOffset, pImportTable->Name);
+		LONG64 fva = RvaToFva(fileHandle, peOffset, pImportTable->Name);
 		LogImportTable("dll名称", "%s", (PCHAR)(fva + (LONG64)fileHandle));
 		// 解析INT  pImportTable->OriginalFirstThunk => THUNK_DATA数组
 		fva = RvaToFva(fileHandle, peOffset, pImportTable->OriginalFirstThunk);
-		PIMAGE_THUNK_DATA32 pImportNameTable = (PIMAGE_THUNK_DATA32)(fva + (LONG64)fileHandle);
+		PMYIMAGE_THUNK_DATA pImportNameTable = (PMYIMAGE_THUNK_DATA)(fva + (LONG64)fileHandle);
 		while (pImportNameTable->u1.Ordinal != 0) {
 			// 判断最高位是否为1
+#ifdef x86_PROGRAM
 			if ((pImportNameTable->u1.Ordinal & 0x80000000) >> 31 != 1) {
+#endif
+#ifdef x64_PROGRAM
+				if ((pImportNameTable->u1.Ordinal & 0x8000000000000000) >> 63 != 1) {
+#endif
 				// 最高位不为1，说明该函数既有函数名也有序号
 				fva = RvaToFva(fileHandle, peOffset, pImportNameTable->u1.AddressOfData);
 				PIMAGE_IMPORT_BY_NAME pTableFunc = (PIMAGE_IMPORT_BY_NAME)(fva + (LONG64)fileHandle);
 				LogImportTable("函数序号", "%04x, 函数名称 : %s", pTableFunc->Hint, pTableFunc->Name); // 说明每个PIMAGE_THUNK_DATA32的大小有用name属性的存在，其是不固定的。
 			}else {
 				// 最高位为1
+#ifdef x86_PROGRAM
 				LogImportTable("函数序号", "%04x", pImportNameTable->u1.Ordinal & 0x7fffffff);
+#endif
+#ifdef x64_PROGRAM
+				LogImportTable("函数序号", "%016I64x", pImportNameTable->u1.Ordinal & 0x7fffffffffffffff);
+#endif
 			}
 			// 下一个函数
 			pImportNameTable++;
@@ -128,16 +133,16 @@ LONG AnalyzeImportTable(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeStru
 
 /**
 *	功能：	RVA to FVA
-*   参数：	RVA，Px86PEStructure
+*   参数：	PE文件映射至内存的指针，RVA
 *	返回值：FVA
 */
-DWORD RvaToFva(PVOID fileHandle , LONG peOffset, DWORD rva){
+LONG64 RvaToFva(PVOID fileHandle , LONG peOffset, LONG64 rva){
 	// pe头
-	PIMAGE_NT_HEADERS32 pNtHeaders = (PIMAGE_NT_HEADERS32)((LONG64)fileHandle + peOffset);
+	PMYIMAGE_NT_HEADERS pNtHeaders = (PMYIMAGE_NT_HEADERS)((LONG64)fileHandle + peOffset);
 	// PE文件头
 	PIMAGE_FILE_HEADER pNtFileHeader = &pNtHeaders->FileHeader;
 	// PE可选头
-	PIMAGE_OPTIONAL_HEADER32 pNtOpHeader = &pNtHeaders->OptionalHeader;
+	PMYIMAGE_OPTIONAL_HEADER pNtOpHeader = &pNtHeaders->OptionalHeader;
 	// 数据目录表的起点
 	PIMAGE_DATA_DIRECTORY pNtDataDir = pNtOpHeader->DataDirectory;
 
@@ -146,14 +151,14 @@ DWORD RvaToFva(PVOID fileHandle , LONG peOffset, DWORD rva){
 		return 0;
 	}
 	// 当文件对齐与内存对齐同步时
-	DWORD fva = rva;
-	DWORD fileAlignment = pNtOpHeader->FileAlignment;
-	DWORD sectionAlignment = pNtOpHeader->SectionAlignment;
+	LONG64 fva = rva;
+	LONG64 fileAlignment = pNtOpHeader->FileAlignment;
+	LONG64 sectionAlignment = pNtOpHeader->SectionAlignment;
 	if (fileAlignment != sectionAlignment) {
-		PIMAGE_SECTION_HEADER pImageSectionHeader = (PIMAGE_SECTION_HEADER)((LONG64)fileHandle + peOffset + sizeof(IMAGE_NT_HEADERS32));
-		DWORD numberOfSections = pNtFileHeader->NumberOfSections;
+		PIMAGE_SECTION_HEADER pImageSectionHeader = (PIMAGE_SECTION_HEADER)((LONG64)fileHandle + peOffset + sizeof(MYIMAGE_NT_HEADERS));
+		LONG64 numberOfSections = pNtFileHeader->NumberOfSections;
 		#pragma warning(disable: 6305)
-		DWORD endSectionHeaders = (LONG64)pImageSectionHeader + numberOfSections * sizeof(IMAGE_SECTION_HEADER) - (LONG64)fileHandle;
+		LONG64 endSectionHeaders = (LONG64)pImageSectionHeader + numberOfSections * sizeof(IMAGE_SECTION_HEADER) - (LONG64)fileHandle;
 		// 在节表头及之前，PE结构是精密排列的。
 		if (rva <= endSectionHeaders) {
 			return fva;
@@ -162,11 +167,11 @@ DWORD RvaToFva(PVOID fileHandle , LONG peOffset, DWORD rva){
 		if (rva > endSectionHeaders && rva < pImageSectionHeader->VirtualAddress) {
 			return 0;
 		}
-		for (DWORD i = 0; i < numberOfSections; i++) {
+		for (LONG64 i = 0; i < numberOfSections; i++) {
 			// 求出节内偏移
-			DWORD baseSection = pImageSectionHeader->VirtualAddress;
-			DWORD virtualSize = pImageSectionHeader->Misc.VirtualSize;
-			DWORD baseFileSection = pImageSectionHeader->PointerToRawData;
+			LONG64 baseSection = pImageSectionHeader->VirtualAddress;
+			LONG64 virtualSize = pImageSectionHeader->Misc.VirtualSize;
+			LONG64 baseFileSection = pImageSectionHeader->PointerToRawData;
 			// RVA在两个节之间的空白区域时，无意义
 			if (i < numberOfSections - 1 && rva > baseSection + virtualSize && rva < (pImageSectionHeader + 1)->VirtualAddress) {
 				return 0;
@@ -174,7 +179,7 @@ DWORD RvaToFva(PVOID fileHandle , LONG peOffset, DWORD rva){
 			// 找到对应节
 			if (rva >= baseSection && rva <= baseSection + virtualSize) {
 				// 节内偏移
-				DWORD sectionOffset = rva - baseSection;
+				LONG64 sectionOffset = rva - baseSection;
 				// 计算fva，fva是针对文件0偏移处计算的；rva是针对文件内存映射处开始计算的
 				fva = baseFileSection + sectionOffset;
 				break;
@@ -186,11 +191,11 @@ DWORD RvaToFva(PVOID fileHandle , LONG peOffset, DWORD rva){
 }
 
 /**
-*	功能：	打印32位PE文件的节表相关信息
-*   参数：	PE文件映射至内存的指针，偏移
+*	功能：	打印32/64位PE文件的节表相关信息
+*   参数：	PE文件映射至内存的指针，偏移，PPEStructure结构体
 *	返回值：
 */
-LONG AnalyzeSectionHeader(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeStructure) {
+LONG64 AnalyzeSectionHeader(PVOID fileHandle, LONG peOffset, PPEStructure pPeStructure) {
 	/* 该宏定义用于寻找第一个节表头
 		#define IMAGE_FIRST_SECTION( ntheader ) ((PIMAGE_SECTION_HEADER)        \
 		((ULONG_PTR)(ntheader) +                                            \
@@ -200,8 +205,8 @@ LONG AnalyzeSectionHeader(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeSt
 	*/
 	SplitLine();
 	PIMAGE_SECTION_HEADER pImageSectionHeader = pPeStructure->pImageSectionHeader;
-	DWORD numberOfSections = pPeStructure->pPeNtFileData->NumberOfSections;
-	for (DWORD i = 0; i < numberOfSections; i++) {
+	LONG64 numberOfSections = pPeStructure->pPeNtFileData->NumberOfSections;
+	for (LONG64 i = 0; i < numberOfSections; i++) {
 		LogSecHeader("节表名称", "%s", pImageSectionHeader->Name);
 		LogSecHeader("VirtualSize", "%08x", pImageSectionHeader->Misc.VirtualSize);   // 内存中的节大小
 		LogSecHeader("VirtualAddress", "%08x", pImageSectionHeader->VirtualAddress);      // 当前节的内存偏移
@@ -222,13 +227,13 @@ LONG AnalyzeSectionHeader(PVOID fileHandle, LONG peOffset, Px86PEStructure pPeSt
 *   参数：	PE文件映射至内存的指针，偏移
 *	返回值：构建PEStructure。
 */
-Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset) {
+PPEStructure AnalyzeNtHeader(PVOID fileHandle, LONG peOffset) {
 	SplitLine();
-	PIMAGE_NT_HEADERS32 pNtHeaders = (PIMAGE_NT_HEADERS32)((LONG64)fileHandle + peOffset);
+	PMYIMAGE_NT_HEADERS pNtHeaders = (PMYIMAGE_NT_HEADERS)((LONG64)fileHandle + peOffset);
 	// PE文件头
 	PIMAGE_FILE_HEADER pNtFileHeader = &pNtHeaders->FileHeader;
 	// PE可选头
-	PIMAGE_OPTIONAL_HEADER32 pNtOpHeader = &pNtHeaders->OptionalHeader;
+	PMYIMAGE_OPTIONAL_HEADER pNtOpHeader = &pNtHeaders->OptionalHeader;
 	// 数据目录表的起点
 	PIMAGE_DATA_DIRECTORY pNtDataDir = pNtOpHeader->DataDirectory;
 
@@ -242,7 +247,7 @@ Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset) {
 		pPeNtFileData->SizeOfOptionalHeader = pNtFileHeader->SizeOfOptionalHeader;
 	}
 	// 文件头的有用信息
-	PPeNtOptionalHeaderData32 pPeNtOptionalData = (PPeNtOptionalHeaderData32)malloc(sizeof(PeNtOptionalHeaderData32));
+	PPeNtOptionalHeaderData pPeNtOptionalData = (PPeNtOptionalHeaderData)malloc(sizeof(PeNtOptionalHeaderData));
 	if (!pPeNtOptionalData) {
 		Log("PPeNtOptionalHeaderData分配堆空间失败", "error", GetLastError());
 	}
@@ -250,7 +255,9 @@ Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset) {
 		pPeNtOptionalData->Magic = pNtOpHeader->Magic;
 		pPeNtOptionalData->AddressOfEntryPoint = pNtOpHeader->AddressOfEntryPoint;
 		pPeNtOptionalData->BaseOfCode = pNtOpHeader->BaseOfCode;
+#ifdef x86_PROGRAM
 		pPeNtOptionalData->BaseOfData = pNtOpHeader->BaseOfData;
+#endif
 		pPeNtOptionalData->SizeOfCode = pNtOpHeader->SizeOfCode;
 		pPeNtOptionalData->FileAlignment = pNtOpHeader->FileAlignment;
 		pPeNtOptionalData->SectionAlignment = pNtOpHeader->SectionAlignment;
@@ -258,15 +265,15 @@ Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset) {
 		pPeNtOptionalData->SizeOfHeaders = pNtOpHeader->SizeOfHeaders;
 		pPeNtOptionalData->SizeOfImage = pNtOpHeader->SizeOfImage;
 	}
-	// 分配Px86PEStructure空间
-	Px86PEStructure pPeStructure = (Px86PEStructure)malloc(sizeof(x86PEStructure));
+	// 分配PPEStructure空间
+	PPEStructure pPeStructure = (PPEStructure)malloc(sizeof(PEStructure));
 	if (!pPeStructure) {
 		Log("Px86PEStructure分配堆空间失败", "error", GetLastError());
 	}else {
 		pPeStructure->pPeNtFileData = pPeNtFileData;
 		pPeStructure->pPeNtOptionalData = pPeNtOptionalData;
 		// 提前计算节表头的开始位置
-		pPeStructure->pImageSectionHeader = (PIMAGE_SECTION_HEADER)((LONG64)fileHandle + peOffset + sizeof(IMAGE_NT_HEADERS32));
+		pPeStructure->pImageSectionHeader = (PIMAGE_SECTION_HEADER)((LONG64)fileHandle + peOffset + sizeof(MYIMAGE_NT_HEADERS));
 	}
 	// 打印PE标识以及PE文件头的信息
 	LogNtHeader("NT Magic", "%c%c", (CHAR)pNtHeaders->Signature, *(PCHAR)((LONG64)&pNtHeaders->Signature + 1));
@@ -278,7 +285,12 @@ Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset) {
 	LogNtHeader("NtFileHeader Size of Optional Header", "%04x", pNtFileHeader->SizeOfOptionalHeader); // 各属性加数据目录表
 	LogNtHeader("NtFileHeader Characteristics", "%04x", pNtFileHeader->Characteristics);
 	// 打印PE可选头的标准属性信息
+#ifdef x86_PROGRAM
 	LogNtHeader("NtOptionalHeader Magic", "%04x  %s", pNtOpHeader->Magic, "32 bit");
+#endif
+#ifdef x64_PROGRAM
+	LogNtHeader("NtOptionalHeader Magic", "%04x  %s", pNtOpHeader->Magic, "64 bit");
+#endif
 	LogNtHeader("NtOptionalHeader MajorLinerVersion", "%02x", pNtOpHeader->MajorLinkerVersion);
 	LogNtHeader("NtOptionalHeader MinorLinerVersion", "%02x", pNtOpHeader->MinorLinkerVersion);
 	LogNtHeader("NtOptionalHeader Size Of Code", "%08x", pNtOpHeader->SizeOfCode);  // 代码段大小
@@ -286,9 +298,16 @@ Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset) {
 	LogNtHeader("NtOptionalHeader Size Of Uninitialized Data", "%08x", pNtOpHeader->SizeOfUninitializedData);
 	LogNtHeader("NtOptionalHeader Address Of Entry Point", "%08x", pNtOpHeader->AddressOfEntryPoint);
 	LogNtHeader("NtOptionalHeader Base Of Code", "%08x", pNtOpHeader->BaseOfCode);
+#ifdef x86_PROGRAM
 	LogNtHeader("NtOptionalHeader Base Of Data", "%08x", pNtOpHeader->BaseOfData);
+#endif
 	// 打印PE可选头中的附加属性信息
+#ifdef x86_PROGRAM
 	LogNtHeader("NtOptionalHeader Image Base", "%08x", pNtOpHeader->ImageBase); //文件预想的加载至内存中的基址 
+#endif
+#ifdef x64_PROGRAM
+	LogNtHeader("NtOptionalHeader Image Base", "%016u64x", pNtOpHeader->ImageBase); //文件预想的加载至内存中的基址 
+#endif
 	LogNtHeader("NtOptionalHeader Section Alignment", "%08x", pNtOpHeader->SectionAlignment); // 各节内存对齐大小
 	LogNtHeader("NtOptionalHeader File Alignment", "%08x", pNtOpHeader->FileAlignment); // 各节文件对齐大小
 	LogNtHeader("NtOptionalHeader Major Operating Version", "%04x", pNtOpHeader->MajorOperatingSystemVersion);
@@ -303,10 +322,18 @@ Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset) {
 	LogNtHeader("NtOptionalHeader CheckSum", "%08x", pNtOpHeader->CheckSum);
 	LogNtHeader("NtOptionalHeader Subsystem", "%04x", pNtOpHeader->Subsystem);  // 文件运行所需子系统
 	LogNtHeader("NtOptionalHeader Dll Characteristics", "%04x", pNtOpHeader->DllCharacteristics);
+#ifdef x86_PROGRAM
 	LogNtHeader("NtOptionalHeader Size Of Stack Reserve", "%08x", pNtOpHeader->SizeOfStackReserve);
 	LogNtHeader("NtOptionalHeader Size Of Stack Commit", "%08x", pNtOpHeader->SizeOfStackCommit);
 	LogNtHeader("NtOptionalHeader Size Of Heap Reserve", "%08x", pNtOpHeader->SizeOfHeapReserve);
 	LogNtHeader("NtOptionalHeader Size Of Heap Commit", "%08x", pNtOpHeader->SizeOfHeapCommit);
+#endif
+#ifdef x64_PROGRAM
+	LogNtHeader("NtOptionalHeader Size Of Stack Reserve", "%016u64x", pNtOpHeader->SizeOfStackReserve);
+	LogNtHeader("NtOptionalHeader Size Of Stack Commit", "%016u64x", pNtOpHeader->SizeOfStackCommit);
+	LogNtHeader("NtOptionalHeader Size Of Heap Reserve", "%016u64x", pNtOpHeader->SizeOfHeapReserve);
+	LogNtHeader("NtOptionalHeader Size Of Heap Commit", "%016u64x", pNtOpHeader->SizeOfHeapCommit);
+#endif
 	LogNtHeader("NtOptionalHeader Loader Flags", "%08x", pNtOpHeader->LoaderFlags);
 	LogNtHeader("NtOptionalHeader Number Of Rva And Sizes", "%08x", pNtOpHeader->NumberOfRvaAndSizes);
 	// 打印PE可选头中的16张表的相关信息
@@ -332,7 +359,7 @@ Px86PEStructure AnalyzeNtHeader32(PVOID fileHandle, LONG peOffset) {
 				pPeNtOptionalData->IAT.VirtualAddress = pNtDataDir->VirtualAddress;
 			}
 		}
-		LogNtHeader("NtOptionalHeader Data Directory", "%s => RVA: %08x, Size: %08x， FVA: %08x",
+		LogNtHeader("NtOptionalHeader Data Directory", "%s => RVA: %08x, Size: %08x， FVA: %08I64x",
 			dataDirName[i], pNtDataDir->VirtualAddress, pNtDataDir->Size, RvaToFva(fileHandle, peOffset, pNtDataDir->VirtualAddress));
 		pNtDataDir++;
 	}
