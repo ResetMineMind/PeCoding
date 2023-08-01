@@ -1,4 +1,4 @@
-#define TYPE 0 // 0 =>32  1 =>64
+#define TYPE 1 // 0 =>32  1 =>64
 #include "pe.h"
 
 /**
@@ -100,6 +100,7 @@ LONG64 AnalyzeImportTable(PVOID fileHandle, LONG peOffset, PPEStructure pPeStruc
 		LogImportTable("dll名称", "%s", (PCHAR)(fva + (LONG64)fileHandle));
 		// 解析INT  pImportTable->OriginalFirstThunk => THUNK_DATA数组
 		fva = RvaToFva(fileHandle, peOffset, pImportTable->OriginalFirstThunk);
+		// fva = RvaToFva(fileHandle, peOffset, pImportTable->FirstThunk);
 		PMYIMAGE_THUNK_DATA pImportNameTable = (PMYIMAGE_THUNK_DATA)(fva + (LONG64)fileHandle);
 		while (pImportNameTable->u1.Ordinal != 0) {
 			// 判断最高位是否为1
@@ -204,9 +205,21 @@ LONG64 AnalyzeSectionHeader(PVOID fileHandle, LONG peOffset, PPEStructure pPeStr
 		))
 	*/
 	SplitLine();
-	PIMAGE_SECTION_HEADER pImageSectionHeader = pPeStructure->pImageSectionHeader;
+	PIMAGE_SECTION_HEADER pImageSectionHeader = (PIMAGE_SECTION_HEADER)((LONG64)fileHandle + peOffset + sizeof(MYIMAGE_NT_HEADERS));
 	LONG64 numberOfSections = pPeStructure->pPeNtFileData->NumberOfSections;
+	PPeSectionGaps pSectionGaps = (PPeSectionGaps)malloc(sizeof(PeSectionGaps) * (numberOfSections + 1));
+	if (!pSectionGaps) {
+		Log("PPeSectionGaps分配堆空间失败", "error", GetLastError());
+	}else {
+		pPeStructure->pSectionGaps = pSectionGaps;
+	}
 	for (LONG64 i = 0; i < numberOfSections; i++) {
+		if (pSectionGaps) {
+			pSectionGaps->Characteristics = pImageSectionHeader->Characteristics;
+			pSectionGaps->freeSpace = pImageSectionHeader->SizeOfRawData - pImageSectionHeader->Misc.VirtualSize;
+			pSectionGaps->sectionFVA = pImageSectionHeader->PointerToRawData + pImageSectionHeader->Misc.VirtualSize;
+			pSectionGaps++;
+		}
 		LogSecHeader("节表名称", "%s", pImageSectionHeader->Name);
 		LogSecHeader("VirtualSize", "%08x", pImageSectionHeader->Misc.VirtualSize);   // 内存中的节大小
 		LogSecHeader("VirtualAddress", "%08x", pImageSectionHeader->VirtualAddress);      // 当前节的内存偏移
@@ -218,6 +231,11 @@ LONG64 AnalyzeSectionHeader(PVOID fileHandle, LONG peOffset, PPEStructure pPeStr
 		LogSecHeader("Number Of Line Numbers", "%04x", pImageSectionHeader->PointerToLinenumbers); // OBJ文件使用
 		LogSecHeader("Characteristics", "%08x", pImageSectionHeader->Characteristics); // 节属性
 		pImageSectionHeader++;
+	}
+	if (pSectionGaps) {
+		pSectionGaps->Characteristics = 0;
+		pSectionGaps->freeSpace = 0;
+		pSectionGaps->sectionFVA = 0;
 	}
 	return 0;
 }
@@ -264,6 +282,7 @@ PPEStructure AnalyzeNtHeader(PVOID fileHandle, LONG peOffset) {
 		pPeNtOptionalData->ImageBase = pNtOpHeader->ImageBase;
 		pPeNtOptionalData->SizeOfHeaders = pNtOpHeader->SizeOfHeaders;
 		pPeNtOptionalData->SizeOfImage = pNtOpHeader->SizeOfImage;
+		pPeNtOptionalData->DataDir = (LONG64)pNtOpHeader->DataDirectory - (LONG64)fileHandle;
 	}
 	// 分配PPEStructure空间
 	PPEStructure pPeStructure = (PPEStructure)malloc(sizeof(PEStructure));
@@ -272,8 +291,8 @@ PPEStructure AnalyzeNtHeader(PVOID fileHandle, LONG peOffset) {
 	}else {
 		pPeStructure->pPeNtFileData = pPeNtFileData;
 		pPeStructure->pPeNtOptionalData = pPeNtOptionalData;
-		// 提前计算节表头的开始位置
-		pPeStructure->pImageSectionHeader = (PIMAGE_SECTION_HEADER)((LONG64)fileHandle + peOffset + sizeof(MYIMAGE_NT_HEADERS));
+		// 提前计算节表头的开始位置RVA
+		pPeStructure->SectionHeader = peOffset + sizeof(MYIMAGE_NT_HEADERS);
 	}
 	// 打印PE标识以及PE文件头的信息
 	LogNtHeader("NT Magic", "%c%c", (CHAR)pNtHeaders->Signature, *(PCHAR)((LONG64)&pNtHeaders->Signature + 1));
@@ -306,7 +325,7 @@ PPEStructure AnalyzeNtHeader(PVOID fileHandle, LONG peOffset) {
 	LogNtHeader("NtOptionalHeader Image Base", "%08x", pNtOpHeader->ImageBase); //文件预想的加载至内存中的基址 
 #endif
 #ifdef x64_PROGRAM
-	LogNtHeader("NtOptionalHeader Image Base", "%016u64x", pNtOpHeader->ImageBase); //文件预想的加载至内存中的基址 
+	LogNtHeader("NtOptionalHeader Image Base", "%016I64x", pNtOpHeader->ImageBase); //文件预想的加载至内存中的基址 
 #endif
 	LogNtHeader("NtOptionalHeader Section Alignment", "%08x", pNtOpHeader->SectionAlignment); // 各节内存对齐大小
 	LogNtHeader("NtOptionalHeader File Alignment", "%08x", pNtOpHeader->FileAlignment); // 各节文件对齐大小
@@ -329,10 +348,10 @@ PPEStructure AnalyzeNtHeader(PVOID fileHandle, LONG peOffset) {
 	LogNtHeader("NtOptionalHeader Size Of Heap Commit", "%08x", pNtOpHeader->SizeOfHeapCommit);
 #endif
 #ifdef x64_PROGRAM
-	LogNtHeader("NtOptionalHeader Size Of Stack Reserve", "%016u64x", pNtOpHeader->SizeOfStackReserve);
-	LogNtHeader("NtOptionalHeader Size Of Stack Commit", "%016u64x", pNtOpHeader->SizeOfStackCommit);
-	LogNtHeader("NtOptionalHeader Size Of Heap Reserve", "%016u64x", pNtOpHeader->SizeOfHeapReserve);
-	LogNtHeader("NtOptionalHeader Size Of Heap Commit", "%016u64x", pNtOpHeader->SizeOfHeapCommit);
+	LogNtHeader("NtOptionalHeader Size Of Stack Reserve", "%016I64x", pNtOpHeader->SizeOfStackReserve);
+	LogNtHeader("NtOptionalHeader Size Of Stack Commit", "%016I64x", pNtOpHeader->SizeOfStackCommit);
+	LogNtHeader("NtOptionalHeader Size Of Heap Reserve", "%016I64x", pNtOpHeader->SizeOfHeapReserve);
+	LogNtHeader("NtOptionalHeader Size Of Heap Commit", "%016I64x", pNtOpHeader->SizeOfHeapCommit);
 #endif
 	LogNtHeader("NtOptionalHeader Loader Flags", "%08x", pNtOpHeader->LoaderFlags);
 	LogNtHeader("NtOptionalHeader Number Of Rva And Sizes", "%08x", pNtOpHeader->NumberOfRvaAndSizes);
@@ -351,12 +370,19 @@ PPEStructure AnalyzeNtHeader(PVOID fileHandle, LONG peOffset) {
 			}else if (i == 1) {
 				pPeNtOptionalData->Import.Size = pNtDataDir->Size;
 				pPeNtOptionalData->Import.VirtualAddress = pNtDataDir->VirtualAddress;
+				// 计算IAT					
+//				PIMAGE_IMPORT_DESCRIPTOR pImportTable = (PIMAGE_IMPORT_DESCRIPTOR)(RvaToFva(fileHandle, peOffset, pNtDataDir->VirtualAddress) + (LONG64)fileHandle);
+//				if (pPeNtOptionalData->Import.Size != 0) {
+//					pPeNtOptionalData->IATRva = pImportTable->FirstThunk;
+//				}else {
+//					pPeNtOptionalData->IATRva = 0;
+//				}
 			}else if (i == 5) {
 				pPeNtOptionalData->BaseReloc.Size = pNtDataDir->Size;
 				pPeNtOptionalData->BaseReloc.VirtualAddress = pNtDataDir->VirtualAddress;
 			}else if (i == 12) {
 				pPeNtOptionalData->IAT.Size = pNtDataDir->Size;
-				pPeNtOptionalData->IAT.VirtualAddress = pNtDataDir->VirtualAddress;
+				pPeNtOptionalData->IAT.VirtualAddress = pNtDataDir->VirtualAddress; // 这样收集的IAT是不准确的
 			}
 		}
 		LogNtHeader("NtOptionalHeader Data Directory", "%s => RVA: %08x, Size: %08x， FVA: %08I64x",
@@ -414,6 +440,8 @@ PVOID OpenPeFile(const char* filePath) {
 	// 将物理页与虚拟地址进行挂钩
 	LPVOID memFile = MapViewOfFile(memHandle, FILE_MAP_READ, 0, 0, fileSize->QuadPart);
 	// 释放资源
+	CloseHandle(fileHandle);
+	CloseHandle(memHandle);
 	free(fileSize);
 	return memFile;
 }

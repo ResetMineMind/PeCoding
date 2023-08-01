@@ -1,13 +1,13 @@
+#define TYPE 1 // 0 =>32  1 =>64 // 不设置这个的话，会导致test.c中使用的PPEStructure 与 peAnalyze.c中的PPEStructure对应的宏不同
 #include "pe.h"
 
-
 int main() {
-	PVOID fileHandle = OpenPeFile("C:\\Users\\xuji\\Desktop\\PeCoding\\cmd_x86.exe");
+	PVOID fileHandle = OpenPeFile("C:\\Users\\xuji\\Desktop\\PeCoding\\cmd_x64_bak.exe");
 	if (!fileHandle) {
 		Log("映射PE文件失败", "error", GetLastError());
 		return -1;
 	}
-	LogData("C:\\Users\\xuji\\Desktop\\PeCoding\\cmd_x86.exe", "内存中映射地址", "0x%p", fileHandle);
+	LogData("C:\\Users\\xuji\\Desktop\\PeCoding\\cmd_x64_bak.exe", "内存中映射地址", "0x%p", fileHandle);
 	// 解析Dos头
 	LONG peOffset = AnalyzeDosHeader(fileHandle);
 	// 解析NT头
@@ -22,8 +22,33 @@ int main() {
 	AnalyzeImportTable(fileHandle, peOffset, pPeStructure);
 	// 解析导出表
 	AnalyzeExportTable(fileHandle, peOffset, pPeStructure);
+	// 关闭只读文件
+	UnmapViewOfFile(fileHandle);
+	//-------------------------------------------------------------------------
+	// 读写权限重新打开文件
+	PVOID fileWriteHandle = OperatePeFile("C:\\Users\\xuji\\Desktop\\PeCoding\\cmd_x64_bak.exe", 0x2000, pPeStructure->pPeNtOptionalData->FileAlignment);
+	if (!fileWriteHandle) {
+		Log("映射PE文件失败", "error", GetLastError());
+		return -1;
+	}
+	LogData("C:\\Users\\xuji\\Desktop\\PeCoding\\cmd_x64_bak.exe", "内存中映射地址", "0x%p", fileWriteHandle);
+	OperatePeMainInfo peMainInfo;
+	peMainInfo.BaseReloc = pPeStructure->pPeNtOptionalData->BaseReloc;
+	peMainInfo.Export = pPeStructure->pPeNtOptionalData->Export;
+	peMainInfo.Import = pPeStructure->pPeNtOptionalData->Import;
+	peMainInfo.Magic = pPeStructure->pPeNtOptionalData->Magic;
+	peMainInfo.NumberOfSections = pPeStructure->pPeNtFileData->NumberOfSections;
+	peMainInfo.SectionHeader = pPeStructure->SectionHeader;
+	peMainInfo.DataDir = pPeStructure->pPeNtOptionalData->DataDir;
+	// 看看IAT
+	FillTheIAT(fileWriteHandle, peOffset, &peMainInfo);
+	// 增加一个节
+	DWORD now_size = AddFileSection(fileWriteHandle, peOffset, &peMainInfo, 6, 0x1001);
+	// 将文件dump下来
+	DumpPeFile("C:\\Users\\xuji\\Desktop\\PeCoding\\cmd_x64_bak2.exe", fileWriteHandle, now_size);
 	// 释放资源
 	free(pPeStructure->pPeNtFileData);
 	free(pPeStructure->pPeNtOptionalData);
+	free(pPeStructure->pSectionGaps);
 	free(pPeStructure);
 }
