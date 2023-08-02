@@ -22,6 +22,90 @@ VOID JudgeFile(PVOID fileHandle, LONG peOffset) {
 	*/
 }
 
+LONG64 AnalyzeResourceTable(PVOID fileHandle, LONG peOffset, PPEStructure pPeStructure) {
+	PIMAGE_RESOURCE_DIRECTORY pResourceTableRoot = (PIMAGE_RESOURCE_DIRECTORY)(RvaToFva(fileHandle, peOffset, pPeStructure->pPeNtOptionalData->Resource) + (LONG64)fileHandle);
+	// 计算二级目录数
+	DWORD numberOfSecond = pResourceTableRoot->NumberOfIdEntries + pResourceTableRoot->NumberOfNamedEntries;
+	// 二级开始的位置
+	PIMAGE_RESOURCE_DIRECTORY_ENTRY firstEntry = (PIMAGE_RESOURCE_DIRECTORY_ENTRY)(pResourceTableRoot + 1);
+	for (LONG64 i = 0; i < numberOfSecond; i++) {
+		TraverseDirectory((LONG64)pResourceTableRoot, peOffset, firstEntry, 1);
+		firstEntry++;
+	}
+}
+VOID TraverseDirectory(PVOID fileHandle, LONG peOffset, PIMAGE_RESOURCE_DIRECTORY_ENTRY nowEntry, DWORD level) {
+	if (nowEntry->DataIsDirectory) {
+		if (nowEntry->NameIsString) {
+			PIMAGE_RESOURCE_DIR_STRING_U pNameStart = (PIMAGE_RESOURCE_DIR_STRING_U)(nowEntry->NameOffset + (LONG64)fileHandle);
+			DWORD len = pNameStart->Length + 2;
+			PWCHAR name = (PWCHAR)malloc(sizeof(WCHAR) * len);
+			if (!name) {
+				exit(-10086);
+			}
+			memset(name, 0x0, sizeof(WCHAR) * len);
+			RtlCopyMemory(name, pNameStart->NameString, pNameStart->Length * sizeof(WCHAR));
+			LogResource("资源目录名称", level, "%S, %d级目录", name, level);
+		}else {
+			LogResource("资源目录ID（类型）", level, "0x%x, %d级目录", nowEntry->Id, level);
+		}
+		PIMAGE_RESOURCE_DIRECTORY newEntry = (PIMAGE_RESOURCE_DIRECTORY)(nowEntry->OffsetToDirectory + (LONG64)fileHandle);
+		// 计算三级目录数
+		DWORD numberOfSecond = newEntry->NumberOfIdEntries + newEntry->NumberOfNamedEntries;
+		// 三级开始的位置
+		PIMAGE_RESOURCE_DIRECTORY_ENTRY firstEntry = (PIMAGE_RESOURCE_DIRECTORY_ENTRY)(newEntry + 1);
+		for (LONG64 i = 0; i < numberOfSecond; i++) {
+			TraverseDirectory(fileHandle, peOffset, firstEntry, level + 1);
+			firstEntry++;
+		}
+	}else {
+		// 资源文件了
+		if (nowEntry->NameIsString) {
+			PIMAGE_RESOURCE_DIR_STRING_U pNameStart = (PIMAGE_RESOURCE_DIR_STRING_U)(nowEntry->NameOffset + (LONG64)fileHandle);
+			DWORD len = pNameStart->Length + 2;
+			PWCHAR name = (PWCHAR)malloc(sizeof(WCHAR) * len);
+			if (!name) {
+				exit(-10086);
+			}
+			memset(name, 0x0, sizeof(WCHAR) * len);
+			RtlCopyMemory(name, pNameStart->NameString, pNameStart->Length * sizeof(WCHAR));
+			LogResource("资源文件名称", level, "%S, %d级目录的文件", name, level);
+		}else {
+			LogResource("资源文件ID（类型）", level, "%d, %d级目录的文件", nowEntry->Id, level);
+		}
+		PIMAGE_RESOURCE_DATA_ENTRY newDataEntry = (PIMAGE_RESOURCE_DATA_ENTRY)(nowEntry->OffsetToData + (LONG64)fileHandle);
+		LogResource("资源文件rva", level, "0x%x, 资源文件大小：0x%x", newDataEntry->OffsetToData, newDataEntry->Size);
+	}
+}
+
+/**
+*	功能：	解析32/64位PE文件的重定位表相关信息
+*   参数：	PE文件映射至内存的指针，偏移，PPEStructure结构体
+*	返回值：
+*/
+LONG64 AnalyzeBaseRelocTable(PVOID fileHandle, LONG peOffset, PPEStructure pPeStructure) {
+	SplitLine();
+	if (pPeStructure->pPeNtOptionalData->BaseReloc.VirtualAddress == 0) {
+		LogBaseRelocTable("重定位表不存在", "None");
+		return 0;
+	}
+	PIMAGE_DATA_DIRECTORY pBaseRelocTableDir = &pPeStructure->pPeNtOptionalData->BaseReloc;
+	PIMAGE_BASE_RELOCATION pBaseRelocTable = (PIMAGE_BASE_RELOCATION)(RvaToFva(fileHandle, peOffset, pBaseRelocTableDir->VirtualAddress) + (LONG64)fileHandle);
+	// 有些PE，VirtualAddress会是0x1
+	while (pBaseRelocTable->VirtualAddress != 0x00000000 && pBaseRelocTable->VirtualAddress != 0x00000001) {
+		DWORD numberOfData = (pBaseRelocTable->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / 2;
+		DWORD baseRva = pBaseRelocTable->VirtualAddress;
+		// 指向第一个待处理块
+		PWORD dataStart = (PWORD)(pBaseRelocTable + 1);
+		// 遍历处理
+		for (DWORD i = 0; i < numberOfData; i++) {
+			DWORD type = dataStart[i] >> 0xc;
+			DWORD offset = dataStart[i] & 0x0fff;
+			LogBaseRelocTable("重定位数据的基址RVA", "0x%x, 相对基址偏移RVA：0x%x, 块内偏移：0x%x", baseRva, offset, i);
+		}
+		pBaseRelocTable = (PIMAGE_BASE_RELOCATION)((LONG64)pBaseRelocTable + pBaseRelocTable->SizeOfBlock);
+	}
+}
+
 /**
 *	功能：	解析32/64位PE文件的导出表相关信息
 *   参数：	PE文件映射至内存的指针，偏移，PPEStructure结构体
@@ -183,6 +267,10 @@ LONG64 RvaToFva(PVOID fileHandle , LONG peOffset, LONG64 rva){
 				LONG64 sectionOffset = rva - baseSection;
 				// 计算fva，fva是针对文件0偏移处计算的；rva是针对文件内存映射处开始计算的
 				fva = baseFileSection + sectionOffset;
+				// 特殊情况，后续可以看看还有没有其他的特殊
+				if (rva == baseSection + virtualSize && rva == (pImageSectionHeader + 1)->VirtualAddress) {
+					fva = baseFileSection + (sectionOffset / sectionAlignment) * fileAlignment;
+				}
 				break;
 			}
 			pImageSectionHeader++;
@@ -219,6 +307,10 @@ LONG64 AnalyzeSectionHeader(PVOID fileHandle, LONG peOffset, PPEStructure pPeStr
 			pSectionGaps->freeSpace = pImageSectionHeader->SizeOfRawData - pImageSectionHeader->Misc.VirtualSize;
 			pSectionGaps->sectionFVA = pImageSectionHeader->PointerToRawData + pImageSectionHeader->Misc.VirtualSize;
 			pSectionGaps++;
+		}
+		if (!strcmp(".rsrc", pImageSectionHeader->Name)) {
+			// 存在资源表的话
+			pPeStructure->pPeNtOptionalData->Resource = pImageSectionHeader->VirtualAddress;
 		}
 		LogSecHeader("节表名称", "%s", pImageSectionHeader->Name);
 		LogSecHeader("VirtualSize", "%08x", pImageSectionHeader->Misc.VirtualSize);   // 内存中的节大小
@@ -257,6 +349,7 @@ PPEStructure AnalyzeNtHeader(PVOID fileHandle, LONG peOffset) {
 
 	// 文件头的有用信息
 	PPeNtFileHeaderData pPeNtFileData = (PPeNtFileHeaderData)malloc(sizeof(PeNtFileHeaderData));
+	memset(pPeNtFileData, 0x0, sizeof(PeNtFileHeaderData));
 	if (!pPeNtFileData) {
 		Log("PeNtFileHeaderData分配堆空间失败", "error", GetLastError());
 	}else {
@@ -266,6 +359,7 @@ PPEStructure AnalyzeNtHeader(PVOID fileHandle, LONG peOffset) {
 	}
 	// 文件头的有用信息
 	PPeNtOptionalHeaderData pPeNtOptionalData = (PPeNtOptionalHeaderData)malloc(sizeof(PeNtOptionalHeaderData));
+	memset(pPeNtOptionalData, 0x0, sizeof(PeNtOptionalHeaderData));
 	if (!pPeNtOptionalData) {
 		Log("PPeNtOptionalHeaderData分配堆空间失败", "error", GetLastError());
 	}
@@ -286,6 +380,7 @@ PPEStructure AnalyzeNtHeader(PVOID fileHandle, LONG peOffset) {
 	}
 	// 分配PPEStructure空间
 	PPEStructure pPeStructure = (PPEStructure)malloc(sizeof(PEStructure));
+	memset(pPeStructure, 0x0, sizeof(PEStructure));
 	if (!pPeStructure) {
 		Log("Px86PEStructure分配堆空间失败", "error", GetLastError());
 	}else {

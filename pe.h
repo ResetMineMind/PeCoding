@@ -65,6 +65,8 @@ typedef struct _PeNtOptionalHeaderData32 {
 	IMAGE_DATA_DIRECTORY BaseReloc;
 	// 数据目录表的开始
 	LONG64 DataDir;
+	// 资源节开始的地方
+	DWORD Resource;
 }PeNtOptionalHeaderData32, * PPeNtOptionalHeaderData32;
 typedef struct _PeNtOptionalHeaderData64 {
 	// 32/64位程序
@@ -99,6 +101,8 @@ typedef struct _PeNtOptionalHeaderData64 {
 	IMAGE_DATA_DIRECTORY BaseReloc;
 	// 数据目录表的开始
 	LONG64 DataDir;
+	// 资源节开始的地方
+	DWORD Resource;
 }PeNtOptionalHeaderData64, * PPeNtOptionalHeaderData64;
 
 // pPeStructure->SectionHeader, pPeStructure->pPeNtFileData->NumberOfSections, pPeStructure->pPeNtOptionalData->Magic
@@ -110,6 +114,9 @@ typedef struct _OperatePeMainInfo {
 	IMAGE_DATA_DIRECTORY Export;
 	IMAGE_DATA_DIRECTORY BaseReloc;
 	LONG64 DataDir;
+	ULONG64 ImageBase;
+	// 资源节开始的地方
+	DWORD Resource;
 }OperatePeMainInfo,*POperatePeMainInfo;
 
 // 节表空闲区间
@@ -182,6 +189,10 @@ typedef struct _x64PEStructure {
 #define LogImportTable(mark, how_type, ...) {printf("[---ImportTable---]  %s : "how_type" \n", mark, __VA_ARGS__);}
 // 用于打印导出表的信息
 #define LogExportTable(mark, how_type, ...) {printf("[---ExportTable---]  %s : "how_type" \n", mark, __VA_ARGS__);}
+// 用于打印重定位表的信息
+#define LogBaseRelocTable(mark, how_type, ...) {printf("[---BaseRelocTable---]  %s : "how_type" \n", mark, __VA_ARGS__);}
+// 用于打印资源信息
+#define LogResource(mark, num, how_type, ...) {char ab[20] = {0x0};for(int i = 0; i < num - 1; i++){ab[i] = '\t';};printf("[---LogResource---] %s %s : "how_type" \n", ab, mark, __VA_ARGS__);}
 // 分割线
 #define SplitLine() {printf("\n********************************************************************************\n\n");}
 
@@ -230,6 +241,14 @@ LONG64 AnalyzeImportTable(PVOID fileHandle, LONG peOffset, PPEStructure pPeStruc
 *	返回值：
 */
 LONG64 AnalyzeExportTable(PVOID fileHandle, LONG peOffset, PPEStructure pPeStructure);
+
+/**
+*	功能：	解析32/64位PE文件的重定位表相关信息
+*   参数：	PE文件映射至内存的指针，偏移，PPEStructure结构体
+*	返回值：
+*/
+LONG64 AnalyzeBaseRelocTable(PVOID fileHandle, LONG peOffset, PPEStructure pPeStructure);
+VOID TraverseDirectory(PVOID fileHandle, LONG peOffset, PIMAGE_RESOURCE_DIRECTORY_ENTRY nowEntry, DWORD level);
 
 /**
 *	功能：	RVA to FVA
@@ -301,7 +320,8 @@ VOID FixExport(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, PO
 VOID FixImport(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, POperatePeMainInfo peMainInfo, PIMAGE_SECTION_HEADER pImageSectionHeader);
 VOID FixBaseReloc(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, POperatePeMainInfo peMainInfo, PIMAGE_SECTION_HEADER pImageSectionHeader);
 VOID FixDataDirectory(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, POperatePeMainInfo peMainInfo, PIMAGE_SECTION_HEADER pImageSectionHeader);
-
+VOID FixResourceTable(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, POperatePeMainInfo peMainInfo, PIMAGE_SECTION_HEADER pImageSectionHeader);
+VOID TraverseAndFixDirectory(PVOID fileHandle, PVOID fileHandle2, LONG peOffset, DWORD addedSize, DWORD index, POperatePeMainInfo peMainInfo, PIMAGE_RESOURCE_DIRECTORY_ENTRY nowEntry, DWORD level, PIMAGE_SECTION_HEADER pImageSectionHeader);
 /**
 * 功能： 传入一个RVA，返回其存在于哪个节区，节区有:-1 0 1 2 3 4 ...；-1意味着它不会发生改变（存在于第一个节之前）
 */

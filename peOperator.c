@@ -1,4 +1,4 @@
-#define TYPE 1
+#define TYPE 0
 #include "pe.h"
 
 /**
@@ -20,9 +20,10 @@ BOOL FillTheIAT(PVOID fileHandle, LONG peOffset, POperatePeMainInfo peMainInfo) 
 	while (pImportTable->Characteristics != 0) {
 		printf("%I64x, %s\n", RvaToFva2(fileHandle, peOffset, pImportTable->Name, peMainInfo->Magic), (PCHAR)(RvaToFva2(fileHandle, peOffset, pImportTable->Name, peMainInfo->Magic) + (LONG64)fileHandle));
 		LONG64 IATStart = (LONG64)(RvaToFva2(fileHandle, peOffset, pImportTable->FirstThunk, peMainInfo->Magic) + (LONG64)fileHandle);
+		LONG64 INTStart = (LONG64)(RvaToFva2(fileHandle, peOffset, pImportTable->OriginalFirstThunk, peMainInfo->Magic) + (LONG64)fileHandle);
 		if (is32bit) {
 			// 32位程序
-			PIMAGE_THUNK_DATA32 pThunkData = (PIMAGE_THUNK_DATA32)IATStart;
+			PIMAGE_THUNK_DATA32 pThunkData = (PIMAGE_THUNK_DATA32)INTStart;
 			while (pThunkData->u1.Ordinal != 0) {
 				HMODULE hDllHandle = LoadLibraryA((PCHAR)(RvaToFva2(fileHandle, peOffset, pImportTable->Name, peMainInfo->Magic) + (LONG64)fileHandle));
 				if (hDllHandle) {
@@ -305,8 +306,10 @@ VOID FixPeFile(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, PO
 	PIMAGE_SECTION_HEADER pOrgImageSectionHeader = pImageSectionHeader;
 	FixExport(fileHandle, peOffset, addedSize, index, peMainInfo, pOrgImageSectionHeader);
 	FixImport(fileHandle, peOffset, addedSize, index, peMainInfo, pOrgImageSectionHeader);
+	// 好像目前为止，修复重定位还没有起作用过
 	FixBaseReloc(fileHandle, peOffset, addedSize, index, peMainInfo, pOrgImageSectionHeader);
 	FixDataDirectory(fileHandle, peOffset, addedSize, index, peMainInfo, pOrgImageSectionHeader);
+	FixResourceTable(fileHandle, peOffset, addedSize, index, peMainInfo, pOrgImageSectionHeader);
 }
 VOID FixExport(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, POperatePeMainInfo peMainInfo, PIMAGE_SECTION_HEADER pImageSectionHeader) {
 	PIMAGE_DATA_DIRECTORY pExportDataDir = &peMainInfo->Export;
@@ -386,6 +389,7 @@ VOID FixImport(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, PO
 	PIMAGE_IMPORT_DESCRIPTOR pImportTable = (PIMAGE_IMPORT_DESCRIPTOR)(RvaToFva2(fileHandle, peOffset, pImportDataDir->VirtualAddress, peMainInfo->Magic) + (LONG64)fileHandle);
 	while (pImportTable->Characteristics != 0) {
 		LogImportTable("dll名称", "%s", (PCHAR)(RvaToFva2(fileHandle, peOffset, pImportTable->Name, peMainInfo->Magic) + (LONG64)fileHandle));
+		// LogImportTable("dll名称", "%s", (PCHAR)(RvaToFva2(fileHandle, peOffset, (pImportTable+1)->Name, peMainInfo->Magic) + (LONG64)fileHandle));
 		// 获取导入表的名称
 		if (FindSection(pImportTable->Name, peMainInfo->NumberOfSections, pImageSectionHeader) >= index) {
 			pImportTable->Name += addedSize;
@@ -430,7 +434,9 @@ VOID FixImport(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, PO
 				pImportTable->OriginalFirstThunk += addedSize;
 			}
 		}
+		// 目前来看，在文件中IAT的值并非与INT一模一样
 		// 修复IAT，但是这一步似乎不是很有必要。因为ntoskrnl.exe中的INT与IAT即使在文件中似乎也并非一致
+		/**
 		if (is32bit) {
 			PIMAGE_THUNK_DATA32 pImportNameTable = (PIMAGE_THUNK_DATA32)(fva2 + (LONG64)fileHandle);
 			while (pImportNameTable->u1.Ordinal != 0) {
@@ -449,8 +455,6 @@ VOID FixImport(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, PO
 			if (FindSection(pImportTable->FirstThunk, peMainInfo->NumberOfSections, pImageSectionHeader) >= index) {
 				pImportTable->FirstThunk += addedSize;
 			}
-			// 下一张导入表
-			pImportTable++;
 		}else {
 			PIMAGE_THUNK_DATA64 pImportNameTable = (PIMAGE_THUNK_DATA64)(fva2 + (LONG64)fileHandle);
 			while (pImportNameTable->u1.Ordinal != 0) {
@@ -469,13 +473,66 @@ VOID FixImport(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, PO
 			if (FindSection(pImportTable->FirstThunk, peMainInfo->NumberOfSections, pImageSectionHeader) >= index) {
 				pImportTable->FirstThunk += addedSize;
 			}
-			// 下一张导入表
-			pImportTable++;
 		}
+		*/
+		// 下一张导入表
+		pImportTable++;
 	}
 }
 VOID FixBaseReloc(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, POperatePeMainInfo peMainInfo, PIMAGE_SECTION_HEADER pImageSectionHeader) {
-
+	BOOL is32bit = TRUE;
+	if (peMainInfo->Magic == 0x010b) {
+		is32bit = is32bit;
+	}
+	else if (peMainInfo->Magic == 0x020b) {
+		is32bit = !is32bit;
+	}
+	else {
+		return FALSE;
+	}
+	PIMAGE_DATA_DIRECTORY pBaseRelocTableDir = &peMainInfo->BaseReloc;
+	if (pBaseRelocTableDir->VirtualAddress == 0) {
+		LogBaseRelocTable("重定位不存在", "None");
+		return 0;
+	}
+	PIMAGE_BASE_RELOCATION pBaseRelocTable = (PIMAGE_BASE_RELOCATION)(RvaToFva2(fileHandle, peOffset, pBaseRelocTableDir->VirtualAddress, peMainInfo->Magic) + (LONG64)fileHandle);
+	// 有些PE，VirtualAddress会是0x1
+	while (pBaseRelocTable->VirtualAddress != 0x00000000 && pBaseRelocTable->VirtualAddress != 0x00000001) {
+		DWORD numberOfData = (pBaseRelocTable->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / 2;
+		DWORD baseRva = pBaseRelocTable->VirtualAddress;
+		// 指向第一个待处理块
+		PWORD dataStart = (PWORD)(pBaseRelocTable + 1);
+		// 遍历处理
+		for (DWORD i = 0; i < numberOfData; i++) {
+			DWORD type = dataStart[i] >> 0xc;
+			DWORD offset = dataStart[i] & 0x0fff;
+			// 找到要修改的硬编码
+			PVOID changedAddr = (PVOID)(RvaToFva2(fileHandle, peOffset, baseRva + offset, peMainInfo->Magic) + (LONG64)fileHandle);
+			// 只有高位是3，该地址才需要重定位，内容修改
+			if (is32bit) {
+				if (type == IMAGE_REL_BASED_HIGHLOW) {
+					DWORD rvaNow = *(PDWORD)changedAddr - (DWORD)peMainInfo->ImageBase;
+					if (FindSection(rvaNow, peMainInfo->NumberOfSections, pImageSectionHeader) >= index) {
+						*(PDWORD)changedAddr += addedSize;
+					}
+				}
+			}
+			else {
+				if (type == 0xa) {
+					DWORD rvaNow = *(PLONG64)changedAddr - (LONG64)peMainInfo->ImageBase;
+					if (FindSection(rvaNow, peMainInfo->NumberOfSections, pImageSectionHeader) >= index) {
+						*(PLONG64)changedAddr += addedSize;
+					}
+				}
+			}
+		}
+		// 修改基本值; 如果这个基本值对应的偏移恰好穿插于分割线，那么会有点问题；
+		if (FindSection(baseRva, peMainInfo->NumberOfSections, pImageSectionHeader) >= index) {
+			pBaseRelocTable->VirtualAddress += AddedDataLength(addedSize, 0x1000) * 0x1000;
+		}
+		LogBaseRelocTable("重定位表修改后基址", "0x%x", pBaseRelocTable->VirtualAddress);
+		pBaseRelocTable = (PIMAGE_BASE_RELOCATION)((LONG64)pBaseRelocTable + pBaseRelocTable->SizeOfBlock);
+	}
 }
 VOID FixDataDirectory(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, POperatePeMainInfo peMainInfo, PIMAGE_SECTION_HEADER pImageSectionHeader) {
 	// 打印PE可选头中的16张表的相关信息
@@ -491,6 +548,37 @@ VOID FixDataDirectory(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD in
 			pNtDataDir->VirtualAddress += addedSize;
 		}
 		pNtDataDir++;
+	}
+}
+VOID FixResourceTable(PVOID fileHandle, LONG peOffset, DWORD addedSize, DWORD index, POperatePeMainInfo peMainInfo, PIMAGE_SECTION_HEADER pImageSectionHeader) {
+	PIMAGE_RESOURCE_DIRECTORY pResourceTableRoot = (PIMAGE_RESOURCE_DIRECTORY)(RvaToFva(fileHandle, peOffset, peMainInfo->Resource) + (LONG64)fileHandle);
+	// 计算二级目录数
+	DWORD numberOfSecond = pResourceTableRoot->NumberOfIdEntries + pResourceTableRoot->NumberOfNamedEntries;
+	// 二级开始的位置
+	PIMAGE_RESOURCE_DIRECTORY_ENTRY firstEntry = (PIMAGE_RESOURCE_DIRECTORY_ENTRY)(pResourceTableRoot + 1);
+	for (LONG64 i = 0; i < numberOfSecond; i++) {
+		TraverseAndFixDirectory((LONG64)pResourceTableRoot, fileHandle, peOffset, addedSize, index, peMainInfo, firstEntry, 1, pImageSectionHeader);
+		firstEntry++;
+	}
+}
+VOID TraverseAndFixDirectory(PVOID fileHandle, PVOID fileHandle2, LONG peOffset, DWORD addedSize, DWORD index, POperatePeMainInfo peMainInfo, PIMAGE_RESOURCE_DIRECTORY_ENTRY nowEntry, DWORD level, PIMAGE_SECTION_HEADER pImageSectionHeader) {
+	if (nowEntry->DataIsDirectory) {
+		PIMAGE_RESOURCE_DIRECTORY newEntry = (PIMAGE_RESOURCE_DIRECTORY)(nowEntry->OffsetToDirectory + (LONG64)fileHandle);
+		// 计算三级目录数
+		DWORD numberOfSecond = newEntry->NumberOfIdEntries + newEntry->NumberOfNamedEntries;
+		// 三级开始的位置
+		PIMAGE_RESOURCE_DIRECTORY_ENTRY firstEntry = (PIMAGE_RESOURCE_DIRECTORY_ENTRY)(newEntry + 1);
+		for (LONG64 i = 0; i < numberOfSecond; i++) {
+			TraverseAndFixDirectory(fileHandle, fileHandle2, peOffset, addedSize, index, peMainInfo, firstEntry, level + 1, pImageSectionHeader);
+			firstEntry++;
+		}
+	}else {
+		// 资源文件
+		PIMAGE_RESOURCE_DATA_ENTRY newDataEntry = (PIMAGE_RESOURCE_DATA_ENTRY)(nowEntry->OffsetToData + (LONG64)fileHandle);
+		if (FindSection(newDataEntry->OffsetToData, peMainInfo->NumberOfSections, pImageSectionHeader) >= index) {
+			newDataEntry->OffsetToData += addedSize;
+		}
+		// LogResource("资源文件rva", level, "0x%x, 资源文件大小：0x%x", newDataEntry->OffsetToData, newDataEntry->Size);
 	}
 }
 
